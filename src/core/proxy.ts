@@ -103,6 +103,18 @@ export function createProxyProxy<T extends Objectish>(
 	return [proxy as any, state]
 }
 
+const protoGuardTraps: ProxyHandler<any> = {
+	get(target, key) {
+		if (key === "__proto__" || key === "prototype") {
+			return Object.freeze(Object.create(null))
+		}
+		return Reflect.get(target, key)
+	},
+	set() {
+		return true
+	}
+}
+
 /**
  * Object drafts
  */
@@ -110,30 +122,10 @@ export const objectTraps: ProxyHandler<ProxyState> = {
 	get(state, prop) {
 		if (prop === DRAFT_STATE) return state
 
-		// Guard against prototype pollution via constructor and __proto__
-		// We allow access but wrap in a proxy that blocks prototype chain traversal
-		if (prop === "constructor" || prop === "__proto__") {
-			const source = latest(state)
-			const value = source[prop]
-			// Return a proxy that allows calling the constructor but blocks access to prototype
-			return new Proxy(value || {}, {
-				get: (target, key) => {
-					// Block __proto__ and prototype access chains
-					if (key === "__proto__" || key === "prototype") {
-						return Object.freeze(Object.create(null))
-					}
-					// Allow normal property access for legitimate use
-					return Reflect.get(target, key)
-				},
-				set: () => {
-					// Silently ignore writes to prevent pollution
-					return true
-				},
-				apply: (target, thisArg, args) => {
-					// Allow constructor to be called as a function (e.g., draft.arr.constructor(1))
-					return Reflect.apply(target as Function, thisArg, args)
-				}
-			})
+		// Prevent prototype pollution via `draft.__proto__` traversal writes.
+		if (prop === "__proto__") {
+			const value = latest(state)[prop]
+			return new Proxy(value || {}, protoGuardTraps)
 		}
 
 		let arrayPlugin = state.scope_.arrayMethodsPlugin_
@@ -183,14 +175,6 @@ export const objectTraps: ProxyHandler<ProxyState> = {
 		return value
 	},
 	has(state, prop) {
-		// Block reserved properties from being detected
-		if (
-			prop === "constructor" ||
-			prop === "__proto__" ||
-			prop === "prototype"
-		) {
-			return false
-		}
 		return prop in latest(state)
 	},
 	ownKeys(state) {
@@ -201,16 +185,6 @@ export const objectTraps: ProxyHandler<ProxyState> = {
 		prop: string /* strictly not, but helps TS */,
 		value
 	) {
-		// Guard against prototype pollution - prevent assignment to reserved properties
-		// that could lead to Object.prototype pollution
-		if (
-			prop === "constructor" ||
-			prop === "__proto__" ||
-			prop === "prototype"
-		) {
-			return true
-		}
-
 		const desc = getDescriptorFromProto(latest(state), prop)
 		if (desc?.set) {
 			// special case: if this write is captured by a setter, we have
